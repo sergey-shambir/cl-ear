@@ -15,19 +15,57 @@
 using namespace std;
 using nlohmann::json;
 
-// convert UTF-8 string to wstring
-std::wstring utf8_to_wstring(const std::string& str)
+namespace
 {
-    std::wstring_convert<std::codecvt_utf8<wchar_t>> myconv;
-    return myconv.from_bytes(str);
+const wchar_t COMPILE_DB_FILENAME[] = L"compile_commands.json";
 }
 
-// convert wstring to UTF-8 string
-std::string wstring_to_utf8(const std::wstring& str)
+class Utils
 {
-    std::wstring_convert<std::codecvt_utf8<wchar_t>> myconv;
-    return myconv.to_bytes(str);
-}
+public:
+	Utils() = delete;
+
+	// Adds '\' to directory path end if it wasn't added already.
+	static wstring AddDirectorySlash(const wstring &dir)
+	{
+		wstring result = dir;
+		if (!dir.empty())
+		{
+			if ((dir.back() != L'\\') && (dir.back() != L'/'))
+			{
+				result += L'\\';
+			}
+		}
+		return result;
+	}
+
+	// convert UTF-8 string to wstring
+	static std::wstring utf8_to_wstring(const std::string& str)
+	{
+		std::wstring_convert<std::codecvt_utf8<wchar_t>> myconv;
+		return myconv.from_bytes(str);
+	}
+
+	// convert wstring to UTF-8 string
+	static std::string wstring_to_utf8(const std::wstring& str)
+	{
+		std::wstring_convert<std::codecvt_utf8<wchar_t>> myconv;
+		return myconv.to_bytes(str);
+	}
+
+	// convert vector<wstring> to UTF-8 vector<string>
+	static std::vector<std::string> wstring_list_to_utf8(const std::vector<std::wstring> &list)
+	{
+		std::vector<std::string> result(list.size());
+		std::transform(list.begin(), list.end(), result.begin(), &Utils::wstring_to_utf8);
+		return result;
+	}
+
+	static std::wstring ConvertSlashesToUnix(const std::wstring& path)
+	{
+		return boost::replace_all_copy(path, L"\\", L"/");
+	}
+};
 
 struct CompileCommand
 {
@@ -37,31 +75,93 @@ struct CompileCommand
 
     json ToJson()const
     {
-        json commandsArr = json::array();
-        std::copy(commands.begin(), commands.end(), back_inserter(commandsArr));
+		vector<wstring> commandsWithFile = commands;
+		commandsWithFile.push_back(Utils::ConvertSlashesToUnix(file));
+		const wstring commandsJoined = boost::join(commandsWithFile, L" ");
 
         json obj = json::object();
-        obj["directory"] = directory;
-        obj["commands"] = commands;
-        obj["file"] = file;
+        obj["directory"] = Utils::wstring_to_utf8(Utils::ConvertSlashesToUnix(directory));
+        obj["command"] = Utils::wstring_to_utf8(commandsJoined);
+        obj["file"] = Utils::wstring_to_utf8(Utils::ConvertSlashesToUnix(file));
 
         return obj;
     }
 };
 
 
+class Environment
+{
+public:
+	Environment() = delete;
+
+	static wstring GetWorkingDirectory()
+	{
+		// MSBuild calls compiler within project directory.
+		wstring workdir;
+		wchar_t currentDir[MAX_PATH];
+		if (::GetCurrentDirectoryW(MAX_PATH, currentDir) != 0)
+		{
+			workdir = currentDir;
+		}
+		return workdir;
+	}
+
+	static vector<wstring> GetSdkIncludePaths()
+	{
+		const char *includeVar = getenv("INCLUDE");
+		vector<wstring> result;
+
+		if (includeVar)
+		{
+			const wstring includeVarUtf16 = Utils::utf8_to_wstring(includeVar);
+			boost::split(result, includeVarUtf16, boost::is_any_of(L";"), boost::algorithm::token_compress_on);
+
+			// Erase empty results (just to ensure correctness).
+			auto newEnd = std::remove_if(result.begin(), result.end(), [](const wstring &str) {
+				return str.empty();
+			});
+			result.erase(newEnd, result.end());
+		}
+
+		return result;
+	}
+
+	static vector<wstring> GetMsCompatibilityFlags()
+	{
+		return{
+			L"-fms-compatibility",
+			L"-fdelayed-template-parsing",
+			L"-fms-extensions",
+		};
+	}
+};
+
+
 class CompileCommandsBuilder
 {
 public:
-    void Build(const wstring &directory, vector<wstring> compileArgs)
-    {
-        JoinMacroDefinitions(compileArgs);
-        TranslateFlags(compileArgs);
+    void Build(vector<wstring> compileArgs)
+	{
+		const wstring directory = Environment::GetWorkingDirectory();
 
-        CompileCommand command;
-        command.directory = directory;
-        command.commands = std::move(compileArgs);
-        m_commands = { command };
+        JoinMacroDefinitions(compileArgs);
+
+		vector<wstring> inputFiles;
+		vector<wstring> compilerFlags = Environment::GetMsCompatibilityFlags();
+		AppendSdkIncludePaths(Environment::GetSdkIncludePaths(), compilerFlags);
+        TranslateFlags(compileArgs, compilerFlags, inputFiles);
+
+
+		m_commands.clear();
+		m_commands.reserve(inputFiles.size());
+		for (const wstring &relativePath : inputFiles)
+		{
+			CompileCommand command;
+			command.directory = directory;
+			command.file = Utils::AddDirectorySlash(directory) + relativePath;
+			command.commands = compilerFlags;
+			m_commands.push_back(command);
+		}
     }
 
     vector<CompileCommand> TakeCommands()
@@ -88,23 +188,35 @@ private:
         }
     }
 
-    void TranslateFlags(vector<wstring> &compileArgs)
+	void AppendSdkIncludePaths(const vector<wstring> &sdkIncludePaths, vector<wstring> &compilerFlags)
+	{
+		compilerFlags.reserve(compilerFlags.size() + sdkIncludePaths.size());
+		std::transform(sdkIncludePaths.begin(), sdkIncludePaths.end(), std::back_inserter(compilerFlags), [](const wstring &path) {
+			return L"-I\"" + Utils::ConvertSlashesToUnix(path) + L"\"";
+		});
+	}
+
+    void TranslateFlags(const vector<wstring> &compileArgs, vector<wstring> &compilerFlags, vector<wstring> &inputFiles)
     {
-        vector<wstring> result;
-        result.reserve(compileArgs.size());
+		compilerFlags.reserve(compilerFlags.size() + compileArgs.size());
+		inputFiles.reserve(inputFiles.size() + compileArgs.size());
+
         for (wstring arg : compileArgs)
         {
             if (boost::starts_with(arg, L"/"))
             {
-                TranslateOneFlag(std::move(arg), result);
+                TranslateOneFlag(std::move(arg), compilerFlags);
             }
+			// Joined macro definition.
+			else if (boost::starts_with(arg, L"-"))
+			{
+				compilerFlags.emplace_back(std::move(arg));
+			}
             else
             {
-                result.emplace_back(std::move(arg));
+				inputFiles.emplace_back(std::move(arg));
             }
         }
-
-        compileArgs = result;
     }
 
     void TranslateOneFlag(wstring flag, vector<wstring> &result)
@@ -190,7 +302,8 @@ private:
             { L"/O1", L"-Os" }, // Creates small code.
             { L"/O2", L"-O2" }, // Creates fast code.
             { L"/P", L"-E"}, // Writes preprocessor output to a file.
-            { L"/Zi", L"-g" }, // Includes debug information in a program database compatible with Edit and Continue.
+            { L"/ZI", L"-g" }, // Includes debug information in a program database compatible with Edit and Continue.
+            { L"/Zi", L"-g" }, // Generates complete debugging information.
             { L"/fp:fast", L"-ffast-math" },
             { L"/W0", L"-w" }, // Disable all warnings
             { L"/W1", L"-Wall" }, // Warning level 1
@@ -283,7 +396,7 @@ public:
         }
 
         vector<CompileCommand> command = TranslateCompileFlags(args);
-        WriteCompileCommand(command);
+        WriteCompileCommandsJson(command);
     }
 
     void RunCompiler()
@@ -311,34 +424,44 @@ private:
     static vector<CompileCommand> TranslateCompileFlags(vector<wstring> compileArgs)
     {
         CompileCommandsBuilder builder;
-        builder.Build(GetWorkingDirectory(), compileArgs);
+        builder.Build(compileArgs);
 
         return builder.TakeCommands();
     }
 
-    static wstring GetWorkingDirectory()
+    static void WriteCompileCommandsJson(const vector<CompileCommand> &commands)
     {
-        // MSBuild calls compiler within project directory.
-        wstring workdir;
-        wchar_t currentDir[MAX_PATH];
-        if (::GetCurrentDirectoryW(MAX_PATH, currentDir) != 0)
-        {
-            workdir = currentDir;
-        }
-        return workdir;
-    }
+		const wstring workdir = Environment::GetWorkingDirectory();
+		const wstring databasePath = Utils::AddDirectorySlash(workdir) + COMPILE_DB_FILENAME;
 
-    static void WriteCompileCommand(const vector<CompileCommand> &commands)
-    {
-        // TODO: write to JSON file
-        for (const CompileCommand &command : commands)
-        {
-            printf("--- %d args ---\n", int(command.commands.size()));
-            for (const wstring &arg : command.commands)
-            {
-                wprintf(L"  '%ls'\n", arg.c_str());
-            }
-        }
+		json commandsArr = json::array();
+
+		// Optionally read existing JSON array.
+		{
+			ifstream input(databasePath);
+			input.exceptions(ios::badbit);
+			if (input.is_open())
+			{
+				input >> commandsArr;
+			}
+		}
+
+		// Add commands to JSON array.
+		for (const CompileCommand &command : commands)
+		{
+			commandsArr.push_back(command.ToJson());
+		}
+
+		// Write compilation database file.
+		{
+			ofstream output(databasePath);
+			if (!output.is_open())
+			{
+				throw std::runtime_error("Cannot write compile_commands.json file at " + Utils::wstring_to_utf8(workdir));
+			}
+			output.exceptions(ios::badbit | ios::failbit);
+			output << commandsArr;
+		}
     }
 
     static vector<wstring> ReadCompileFlagsFromFile(const wstring &path)
@@ -346,7 +469,7 @@ private:
         FILE *input = _wfopen(path.c_str(), L"rb");
         if (input == nullptr)
         {
-            throw std::runtime_error("Cannot open file: " + wstring_to_utf8(path));
+            throw std::runtime_error("Cannot open file: " + Utils::wstring_to_utf8(path));
         }
         BOOST_SCOPE_EXIT_ALL(&) {
             fclose(input);
