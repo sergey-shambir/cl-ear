@@ -1,0 +1,30 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="json">
+      <UniqueIdentifier>{7ebc67ff-26d7-4bbe-bafc-0ea2a019ab04}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="main">
+      <UniqueIdentifier>{27e9ef55-d1b6-4575-a71f-b2f2cb0c6d02}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="json\json.hpp">
+      <Filter>json</Filter>
+    </ClInclude>
+    <ClInclude Include="stdafx.h">
+      <Filter>main</Filter>
+    </ClInclude>
+    <ClInclude Include="targetver.h">
+      <Filter>main</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>main</Filter>
+    </ClCompile>
+    <ClCompile Include="stdafx.cpp">
+      <Filter>main</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
