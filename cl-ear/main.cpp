@@ -2,11 +2,12 @@
 //
 
 #include "stdafx.h"
-#include "json/json.hpp"
+#include <nlohmann/json.hpp>
 #include <boost/scope_exit.hpp>
 #include <boost/algorithm/string.hpp>
 #include <unordered_map>
 #include <unordered_set>
+#include <iostream>
 
 #define NOMINMAX
 #include <Windows.h>
