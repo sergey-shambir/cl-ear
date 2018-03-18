@@ -1,0 +1,6 @@
+[requires]
+jsonformoderncpp/3.1.2@vthiery/stable
+boost_algorithm/1.66.0@bincrafters/stable
+
+[generators]
+visual_studio_multi
